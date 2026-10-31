@@ -18,7 +18,7 @@ function config(env) {
   return {
     port: num(env.PORT, 8080), bind: env.BIND || '0.0.0.0',
     adminToken: env.ADMIN_TOKEN && env.ADMIN_TOKEN.length >= 16 ? env.ADMIN_TOKEN : null,
-    origins: (env.ALLOWED_ORIGINS || 'https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean),
+    origins: (env.ALLOWED_ORIGINS || 'https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app,https://tkd-net.onrender.com').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean),
     allowNoOrigin: env.ALLOW_NO_ORIGIN !== '0',
     maxViewers: num(env.MAX_VIEWERS, 100), frameHz: Math.min(30, Math.max(1, num(env.FRAME_HZ, 15))),
     saveEveryMs: num(env.SAVE_EVERY_S, 60) * 1000, poolEveryMs: num(env.POOL_SAVE_EVERY_S, 600) * 1000,
@@ -63,11 +63,11 @@ function start(env, opts) {
   function serverInfo() {
     return { host: C.hostName, bootId: S.bootId, startedAt: iso(S.startedAt), uptime: Math.round((Date.now() - S.startedAt) / 1000),
       state: S.state, since: iso(S.since), message: S.message || null, trainSeconds: trainSeconds(), rounds: rounds(),
-      viewers: S.clients.size, maxViewers: C.maxViewers, frameHz: C.frameHz, restarts: S.restarts, epoch: P.resets,
+      viewers: S.clients.size, watching: watchingCount(), maxViewers: C.maxViewers, frameHz: C.frameHz, restarts: S.restarts, epoch: P.resets,
       persistence: P.state(), version: { server: SERVER_VERSION, protocol: PROTOCOL, files, rl: S.booted && S.booted.rlVersion, sim: S.booted && S.booted.simName },
       memory: S.mem };
   }
-  function helloMsg(extra) { const i = serverInfo(); return Object.assign({ type: 'hello', protocol: PROTOCOL, state: i.state, since: i.since, message: i.message, rounds: i.rounds, viewers: i.viewers, persistence: i.persistence, version: i.version, epoch: P.resets, server: i }, extra || {}); }
+  function helloMsg(extra) { const i = serverInfo(); return Object.assign({ type: 'hello', protocol: PROTOCOL, state: i.state, since: i.since, message: i.message, rounds: i.rounds, viewers: i.viewers, watching: i.watching, persistence: i.persistence, version: i.version, epoch: P.resets, server: i }, extra || {}); }
   function setState(state, message) {
     const changed = state !== S.state || (message || null) !== (S.message || null);
     if (state !== S.state) S.since = Date.now();
@@ -76,6 +76,10 @@ function start(env, opts) {
   }
 
   // ------------------------------------------------------------ fan-out
+  // A viewer can send {type:'watch', on:false} (hidden tab): it then gets no high-rate messages (frame, viz, learn,
+  // round, stats), only hello (changes + 20 s heartbeat), ready, status, history, elo, saved, error and pong.
+  // {type:'watch', on:true} replays the latest status/stats/frame and resumes. Default on. 'watching' = sockets with it on.
+  function watchingCount() { let n = 0; for (const ws of S.clients) if (ws._tkd.watch) n++; return n; }
   function sendRaw(ws, data, isFrame) {
     if (ws.readyState !== 1) return;
     if (ws.bufferedAmount > C.hardBufferLimit) { ws.terminate(); return; } // hopelessly slow: drop the viewer, never the trainer
@@ -84,10 +88,16 @@ function start(env, opts) {
     if (isFrame) S.framesSent++;
   }
   function stamp(m) { m.epoch = P.resets; return m; }
-  function broadcast(m, isFrame) {
+  // hi = high-rate message (frame/viz/learn/round/stats): only for sockets that are watching
+  function broadcast(m, isFrame, hi) {
     if (!S.clients.size) return;
-    const data = JSON.stringify(stamp(m));
-    for (const ws of S.clients) if (ws._tkd.welcomed) sendRaw(ws, data, isFrame);
+    hi = hi || isFrame;
+    let data = null;
+    for (const ws of S.clients) {
+      if (!ws._tkd.welcomed || (hi && !ws._tkd.watch)) continue;
+      if (data === null) data = JSON.stringify(stamp(m)); // serialised once, and only if someone gets it
+      sendRaw(ws, data, isFrame);
+    }
   }
   function sendTo(ws, m) { sendRaw(ws, JSON.stringify(stamp(m)), false); }
 
@@ -116,9 +126,22 @@ function start(env, opts) {
     if (S.status) sendTo(ws, Object.assign({}, S.status, { replay: true }));
     if (S.ready) sendTo(ws, historyMsg());
     if (S.lastElo) sendTo(ws, Object.assign({}, S.lastElo, { replay: true }));
-    if (S.stats) sendTo(ws, Object.assign({}, S.stats, { replay: true, server: serverInfo() }));
+    if (S.stats && ws._tkd.watch) sendTo(ws, Object.assign({}, S.stats, { replay: true, server: serverInfo() }));
     if (S.lastSavedRemote) sendTo(ws, Object.assign({}, S.lastSavedRemote, { replay: true }));
-    if (S.lastFrame) sendTo(ws, { type: 'frame', round: S.lastFrame.round, t: S.lastFrame.t, state: S.lastFrame.state, seq: S.frameSeq, replay: true });
+    if (S.lastFrame && ws._tkd.watch) sendTo(ws, replayFrame());
+  }
+  function replayFrame() { return { type: 'frame', round: S.lastFrame.round, t: S.lastFrame.t, state: S.lastFrame.state, seq: S.frameSeq, replay: true }; }
+  function setWatch(ws, on) {
+    const k = ws._tkd, was = k.watch;
+    k.watch = on;
+    if (!k.welcomed) return; // the snapshot (sent on hello / after 1 s) respects the flag
+    sendTo(ws, helloMsg({ reply: true, watch: on }));
+    if (on) { // replay the latest status, stats and frame, then the live stream resumes
+      if (S.status) sendTo(ws, Object.assign({}, S.status, { replay: true }));
+      if (S.stats) sendTo(ws, Object.assign({}, S.stats, { replay: true, server: serverInfo() }));
+      if (S.lastFrame) sendTo(ws, replayFrame());
+      if (!was && S.lastFrame && !S.frameTimer) S.lastFrame._sent = false;
+    }
   }
 
   // ------------------------------------------------------------ worker thread
@@ -182,18 +205,18 @@ function start(env, opts) {
         return;
       case 'frame':
         delete m.epoch; S.lastFrame = m;
-        if (S.clients.size && !S.frameTimer) pumpFrame();
+        if (!S.frameTimer && watchingCount()) pumpFrame();
         return;
       case 'round': {
         delete m.epoch;
         S.recentRounds.push({ round: m.round, winner: m.winner, hitsA: m.hits[0], hitsB: m.hits[1], live: m.live, kind: m.kind });
         if (S.recentRounds.length > 500) S.recentRounds.splice(0, S.recentRounds.length - 500);
-        if (C.roundMsgs === 'all' || m.live) broadcast(m);
+        if (C.roundMsgs === 'all' || m.live) broadcast(m, false, true);
         return;
       }
       case 'learn': {
         delete m.epoch; const f = m.fighter | 0, t = Date.now();
-        if (t - S.lastLearnSent[f] >= C.learnMs) { S.lastLearnSent[f] = t; broadcast(m); }
+        if (t - S.lastLearnSent[f] >= C.learnMs) { S.lastLearnSent[f] = t; broadcast(m, false, true); }
         return;
       }
       case 'elo':
@@ -203,12 +226,12 @@ function start(env, opts) {
         broadcast(m); return;
       case 'stats':
         delete m.epoch; S.stats = m;
-        broadcast(Object.assign({}, m, { server: serverInfo() })); return;
+        broadcast(Object.assign({}, m, { server: serverInfo() }), false, true); return;
       case 'saved': { // the worker's local save into mem-idb (every ~5 s); remote uploads post their own 'saved'
         const ws = S.localSaveWaiters; S.localSaveWaiters = []; ws.forEach((fn) => fn(m)); return;
       }
       case 'viz':
-        delete m.epoch; broadcast(plain(m, 0)); return;
+        delete m.epoch; if (watchingCount()) broadcast(plain(m, 0), false, true); return;
       case 'error':
         delete m.epoch; broadcast(m); return;
       default:
@@ -232,7 +255,7 @@ function start(env, opts) {
     try {
       const r = await S.saving;
       if (withPool) S.lastPoolUpload = Date.now();
-      S.lastSavedRemote = { type: 'saved', remote: true, persistence: P.mode, generation: r.generation, rounds: meta.rounds, trainSeconds: meta.trainSeconds,
+      S.lastSavedRemote = { type: 'saved', ok: true, remote: true, persistence: P.mode, generation: r.generation, rounds: meta.rounds, trainSeconds: meta.trainSeconds,
         bytes: r.bytes + r.poolBytes, stateBytes: r.bytes, poolBytes: r.poolBytes, pool: withPool, at: Date.now(), ms: Date.now() - t0, why };
       broadcast(Object.assign({}, S.lastSavedRemote));
       log('saved gen', r.generation, why, 'state', r.bytes, 'B', withPool ? 'pool ' + r.poolBytes + ' B' : '', (Date.now() - t0) + ' ms', 'rounds', meta.rounds);
@@ -299,7 +322,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDe
     wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, req));
   });
   function onConnection(ws, req) {
-    ws._tkd = { ip: (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim(), alive: true, dropped: 0, welcomed: false, bucket: 20, bucketAt: Date.now() };
+    ws._tkd = { ip: (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim(), alive: true, dropped: 0, welcomed: false, watch: true, bucket: 20, bucketAt: Date.now() };
     if (S.clients.size >= C.maxViewers) {
       ws.send(JSON.stringify({ type: 'error', code: 'full', message: 'server full (' + C.maxViewers + ' viewers): use in-browser mode', epoch: P.resets }));
       ws.close(1013, 'server full'); return;
@@ -321,6 +344,10 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDe
         if (!k.welcomed) welcome(ws); else sendTo(ws, helloMsg({ reply: true, epochChanged: m.epochSeen != null && Number(m.epochSeen) !== P.resets }));
         return;
       }
+      if (m.type === 'watch') { // sent by the page only when its tab is hidden/shown; costs one message like any other
+        if (typeof m.on !== 'boolean') { sendTo(ws, { type: 'error', code: 'invalid', message: "watch needs on:true or on:false" }); return; }
+        setWatch(ws, m.on); return;
+      }
       if (m.type === 'ping') { sendTo(ws, { type: 'pong', t: m.t, serverTime: Date.now() }); return; }
       if (m.type === 'reset') {
         const ok = C.adminToken && typeof m.token === 'string' && m.token.length === C.adminToken.length && crypto.timingSafeEqual(Buffer.from(m.token), Buffer.from(C.adminToken));
@@ -340,8 +367,8 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDe
     for (const ws of S.clients) { if (!ws._tkd.alive) { ws.terminate(); S.clients.delete(ws); continue; } ws._tkd.alive = false; try { ws.ping(); } catch (e) { /* ignore */ } }
     broadcast(helloMsg({ heartbeat: true }));
   }, C.heartbeatMs));
-  timers.push(setInterval(() => { // viz for viewers (1/s)
-    if (S.clients.size && S.worker && S.state === 'training') S.worker.postMessage({ type: 'viz', id: 'server-' + (++S.vizSeq) });
+  timers.push(setInterval(() => { // viz for watching viewers (1/s)
+    if (S.worker && S.state === 'training' && watchingCount()) S.worker.postMessage({ type: 'viz', id: 'server-' + (++S.vizSeq) });
   }, C.vizMs));
   timers.push(setInterval(() => { if (S.dirtyState && S.state === 'training') upload('periodic'); }, C.saveEveryMs));
   timers.push(setInterval(() => { // watchdog: a hung trainer is restarted from the last records
@@ -351,7 +378,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDe
     const mu = process.memoryUsage();
     S.mem.rssMB = Math.round(mu.rss / 1048576 * 10) / 10; S.mem.mainHeapMB = Math.round(mu.heapUsed / 1048576 * 10) / 10; S.mem.arrayBuffersMB = Math.round(mu.arrayBuffers / 1048576 * 10) / 10; S.mem.at = iso(Date.now());
     if (S.worker) S.worker.postMessage({ type: '__mem' });
-    log('mem rss', S.mem.rssMB, 'MB main heap', S.mem.mainHeapMB, 'MB arrayBuffers', S.mem.arrayBuffersMB, 'MB worker heap', S.mem.workerHeapMB, 'MB | viewers', S.clients.size, 'rounds', rounds(), 'trainS', trainSeconds(), 'frames sent/dropped', S.framesSent, '/', S.framesDropped);
+    log('mem rss', S.mem.rssMB, 'MB main heap', S.mem.mainHeapMB, 'MB arrayBuffers', S.mem.arrayBuffersMB, 'MB worker heap', S.mem.workerHeapMB, 'MB | viewers', S.clients.size, 'watching', watchingCount(), 'rounds', rounds(), 'trainS', trainSeconds(), 'frames sent/dropped', S.framesSent, '/', S.framesDropped);
   }
   timers.push(setInterval(memLog, C.memLogMs));
 
@@ -387,7 +414,14 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDe
     await new Promise((r) => server.listen(C.port, C.bind, r));
     log('listening on', C.bind + ':' + server.address().port, '| persistence', P.mode, P.where || '', P.reason || '', '| origins', C.origins.join(' '), '| files', JSON.stringify(files));
     try {
-      const r = await P.load();
+      // a sleeping/paused Supabase project or a network blip at wake must not cost the whole session's training:
+      // retry the load a few times (5 s, 15 s, 45 s) before falling back to memory-only.
+      let r = null, lastErr = null;
+      for (const wait of [0, 5000, 15000, 45000]) {
+        if (wait) { setState('waking', 'could not reach the brain store, retrying in ' + wait / 1000 + ' s'); await new Promise((res) => setTimeout(res, wait)); }
+        try { r = await P.load(); lastErr = null; break; } catch (e) { lastErr = e; if (e.code === 'ARS401') break; }
+      }
+      if (lastErr) throw lastErr;
       S.restoredInfo = r.info;
       if (r.kv) { S.kv = r.kv; setState('resuming', 'restoring saved brains (' + r.info + ')'); } else setState('waking', 'starting fresh brains: ' + r.info);
       log('restore:', r.info);

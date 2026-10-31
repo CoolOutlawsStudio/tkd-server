@@ -1,6 +1,6 @@
 -- TKD-Net Arena server persistence (owner: Moneyman). NOT APPLIED. Review: Waffle. Apply: Moneyman, Supabase SQL editor,
--- project oxwapwhazogjgjdtyvsx. Idempotent (safe to run twice). Needs the pgcrypto extension (Supabase installs it in
--- schema `extensions` by default).
+-- project oxwapwhazogjgjdtyvsx. Idempotent (safe to run twice). Uses the built-in pg_catalog.sha256() (PG 11+), so it
+-- does not depend on where (or whether) pgcrypto is installed. Runs in one transaction: all or nothing.
 --
 -- Model: the arena server talks to Supabase with the PUBLIC anon key only. The anon key alone can do nothing here:
 --   * table public.arena_brains has RLS on and NO policies, and anon/authenticated have no table privileges, so it can't
@@ -16,7 +16,7 @@
 -- 2 generations per kind are kept. Generations must increase: a stale writer (a second server instance still running
 -- after a deploy) gets error ARS409 instead of overwriting newer brains.
 
-create extension if not exists pgcrypto with schema extensions;
+begin;
 
 create table if not exists public.arena_brains (
   kind        text        not null check (kind in ('state', 'pool')),
@@ -47,10 +47,10 @@ stable
 security definer
 set search_path = ''
 as $$
-  select coalesce(length(p_secret) >= 32 and exists (
-    select 1 from public.arena_server_config c
-    where c.id = 1 and c.secret_sha256 = encode(extensions.digest(convert_to(p_secret, 'UTF8'), 'sha256'), 'hex')
-  ), false);
+  select case when p_secret is null or octet_length(p_secret) < 32 or octet_length(p_secret) > 256 then false
+         else exists (select 1 from public.arena_server_config c
+                       where c.id = 1 and c.secret_sha256 = pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_secret, 'UTF8')), 'hex'))
+         end;
 $$;
 revoke all on function public.arena_secret_ok(text) from public, anon, authenticated;
 
@@ -78,7 +78,10 @@ begin
   if v_bytes > 4194304 then
     raise exception 'ARS413: payload is % bytes, limit 4194304', v_bytes using errcode = '22023';
   end if;
-  if p_sha256 is null or encode(extensions.digest(convert_to(p_payload, 'UTF8'), 'sha256'), 'hex') <> p_sha256 then
+  if p_meta is not null and octet_length(p_meta::text) > 16384 then
+    raise exception 'ARS413: meta is % bytes, limit 16384', octet_length(p_meta::text) using errcode = '22023';
+  end if;
+  if p_sha256 is null or pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_payload, 'UTF8')), 'hex') <> p_sha256 then
     raise exception 'ARS422: sha256 does not match the payload' using errcode = '22023';
   end if;
   -- serialise concurrent writers of the same kind
@@ -102,7 +105,7 @@ $$;
 create or replace function public.arena_load(p_secret text)
 returns table (kind text, generation bigint, sha256 text, bytes integer, payload text, meta jsonb, saved_at timestamptz)
 language plpgsql
-stable
+volatile -- volatile => PostgREST accepts POST only, so the secret can never travel in a GET query string / access log
 security definer
 set search_path = ''
 as $$
@@ -142,6 +145,8 @@ revoke all on function public.arena_clear(text) from public, authenticated;
 grant execute on function public.arena_save(text, text, bigint, text, text, jsonb) to anon;
 grant execute on function public.arena_load(text) to anon;
 grant execute on function public.arena_clear(text) to anon;
+
+commit;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- ONE-TIME SETUP (run separately, after the block above). Generate the secret on the machine that will run the

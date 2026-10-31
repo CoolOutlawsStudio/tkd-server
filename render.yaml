@@ -18,8 +18,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
-      - key: ALLOWED_ORIGINS
-        value: https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app
+      - key: ALLOWED_ORIGINS         # GitHub Pages, Netlify and the Render static site (the page must use wss://)
+        value: https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app,https://tkd-net.onrender.com
       - key: SUPABASE_URL
         value: https://oxwapwhazogjgjdtyvsx.supabase.co
       - key: SUPABASE_ANON_KEY       # the PUBLIC anon key (a service_role key is refused by the server)

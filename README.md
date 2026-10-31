@@ -44,9 +44,11 @@ Before every push run `npm run sync && npm run check-vendor && npm test`.
 2. Render -> New -> Blueprint -> the repo. It reads `render.yaml` (free plan, `npm ci --omit=dev`, `node server.js`,
    health check `/health`). Type the 3 `sync: false` values: `SUPABASE_ANON_KEY`, `SERVER_SECRET`, `ADMIN_TOKEN`.
 3. Apply `supabase_arena_server.sql` and insert the secret's sha256 (below) **before** the first start, or it runs memory-only.
-4. Kai sets `TKD_SERVER_URL = 'wss://<service>.onrender.com/arena'`.
+4. Kai sets `TKD_SERVER_URL = 'wss://<service>.onrender.com/arena'` (`wss://`: the pages are https). `ALLOWED_ORIGINS` in
+   `render.yaml` is `https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app,https://tkd-net.onrender.com`, the
+   three origins that serve the page; a page on any other origin gets HTTP 403 on the socket.
 Render free behaviour and measured numbers: `ARENA-SERVER-CONTRACT.md` 6.10-6.11. In short: it sleeps 15 min after the
-last viewer message, takes about 1 min to wake on the next connection, resumes the saved brains in about 2 s, keeps the live match at 10 Hz on
+last viewer message (hidden tabs send `watch:false` and no `ping`, so they let it sleep), takes about 1 min to wake on the next connection, resumes the saved brains in about 2 s, keeps the live match at 10 Hz on
 0.1 CPU while practice training slows about 10x, and uses about 1.2 KB/s per viewer.
 
 ### Container (any Docker host)
@@ -58,11 +60,11 @@ Not built here (no Docker on the box). Render uses the native Node runtime from 
 | var | default | meaning |
 |---|---|---|
 | `PORT` | 8080 | HTTP + WS port (`BIND` default 0.0.0.0) |
-| `ALLOWED_ORIGINS` | `https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app` | CORS + WebSocket Origin allow-list (comma-separated) |
+| `ALLOWED_ORIGINS` | `https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app,https://tkd-net.onrender.com` | CORS + WebSocket Origin allow-list (comma-separated). Every page origin that connects must be listed (Render sets the same three in `render.yaml`) |
 | `ALLOW_NO_ORIGIN` | 1 | allow WS clients that send no Origin (tools, tests); 0 = browsers only |
 | `ADMIN_TOKEN` | unset (reset disabled) | >= 16 chars; enables the admin `reset` message |
 | `SUPABASE_URL` | unset | e.g. `https://oxwapwhazogjgjdtyvsx.supabase.co` |
-| `SUPABASE_ANON_KEY` | unset | the **public anon** key (a service_role key is refused) |
+| `SUPABASE_ANON_KEY` | unset | the **public anon** key (a service_role or `sb_secret_` key is refused) |
 | `SERVER_SECRET` | unset | >= 32 random chars; its SHA-256 goes into `arena_server_config` |
 | `DATA_DIR` | unset | file persistence (used only if the Supabase vars are not set) |
 | `SAVE_EVERY_S` | 60 | upload interval for `state` (brains + history + meta) |
@@ -80,7 +82,10 @@ Not built here (no Docker on the box). Render uses the native Node runtime from 
 | `HEARTBEAT_S`, `MEM_LOG_S`, `WATCHDOG_S`, `HISTORY_ROUNDS`, `HISTORY_ELO`, `QUIET` | 20, 1000, 60, 30, 100, 120, 0 | tuning |
 
 ## Persistence setup (Supabase; done by Moneyman from a 1:1, after Waffle's review)
-1. SQL editor -> run `supabase_arena_server.sql` (idempotent).
+1. SQL editor -> run `supabase_arena_server.sql` (idempotent, one transaction, uses the built-in `pg_catalog.sha256()`,
+   so pgcrypto is not needed). The secret's hash is inserted as a **separate** step (2), never inside that script.
+   Run only **one** server per Supabase project at a time (not the box and Render together): two live instances would
+   keep overwriting each other's generations in turns.
 2. On the host: `node -e "const c=require('crypto');const s=c.randomBytes(32).toString('base64url');console.log('SERVER_SECRET='+s);console.log('sha256='+c.createHash('sha256').update(s).digest('hex'))"`.
    Put `SERVER_SECRET` in the host env only. Paste only the sha256 into
    `insert into public.arena_server_config (id, secret_sha256) values (1,'<sha256>') on conflict (id) do update set secret_sha256=excluded.secret_sha256, updated_at=now();`
@@ -89,10 +94,10 @@ Not built here (no Docker on the box). Render uses the native Node runtime from 
 
 ## Tests
 ```
-npm test                                  # stream contract, persistence/restart (fake Supabase), file backend, limits, vendor drift, ~2 min
+npm test                                  # stream contract, watch on/off, persistence/restart (fake Supabase), file backend, limits, vendor drift, ~2.5 min
 node test/test-viewers.js                 # 0 vs 5 viewers throughput + identical frames, ~3.5 min
 node test/soak.js 20                      # 20-min soak; CPU_LIMIT=0.5 CPU=6 for a half-core estimate
 node test/bandwidth.js 60                 # bytes per viewer by message type (CPU_LIMIT=0.1, VIZ_MS=5000 ...)
 node test/coldstart.js                    # Render-style: train, SIGTERM, cold start at 0.1 CPU from fake Supabase
-cd test/sql && npm i && node sqltest.mjs  # the SQL on PGlite (Postgres 17 WASM + pgcrypto)
+cd test/sql && npm i && node sqltest.mjs  # the SQL on PGlite (Postgres 17 WASM, no pgcrypto needed)
 ```
