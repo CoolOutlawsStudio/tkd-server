@@ -14,10 +14,10 @@ services:
     buildCommand: npm ci --omit=dev
     startCommand: node server.js
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeployTrigger: "off"          # deploy by hand, only QA-passed shas
     envVars:
       - key: NODE_VERSION
-        value: "20"
+        value: "24"
       - key: ALLOWED_ORIGINS         # GitHub Pages, Netlify and the Render static site (the page must use wss://)
         value: https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app,https://tkd-net.onrender.com
       - key: SUPABASE_URL
