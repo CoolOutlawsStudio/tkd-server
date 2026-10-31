@@ -35,7 +35,7 @@ services:
       - key: VIZ_MS                  # network-panel push every 5 s (1 s costs ~3x the bandwidth)
         value: "5000"
       - key: FRAME_HZ                # live match is 10 Hz; never send more
-        value: "10"
+        value: "5"
       - key: MAX_VIEWERS
         value: "50"
       - key: WORKER_HEAP_MB

@@ -10,9 +10,10 @@ lib/arena-host.js            worker thread: Web-Worker shim that runs vendor/are
 lib/mem-idb.js               in-memory IndexedDB for the unchanged arena-store.js (writes mirrored to the main thread)
 lib/persistence.js           supabase (RPC + secret) | file (DATA_DIR) | memory backends, generations, sha checks
 lib/codec.js                 arena-store records <-> gzipped JSON base64 (typed arrays lossless)
+lib/wire.js                  WIRE=page: slims frame/viz/learn/round/stats to the fields the page reads (F1)
 vendor/                      byte-identical copies of arena-sim.js, arena-rl.js, arena-worker.js, arena-store.js (+SHAS.json)
 scripts/sync-vendor.js       refresh vendor/ from /workspace/tkd-net (--check = fail on drift)
-supabase_arena_server.sql    table + SECURITY DEFINER RPCs (NOT applied)
+supabase_arena_server.sql    table + SECURITY DEFINER RPCs (applied live 2026-10-30 8:40 pm PT)
 test/                        tests, fake Supabase, soak; results in test/results/
 Dockerfile, render.yaml      container (node:20-alpine) and Render fallback blueprint
 ```
@@ -48,8 +49,11 @@ Before every push run `npm run sync && npm run check-vendor && npm test`.
    `render.yaml` is `https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app,https://tkd-net.onrender.com`, the
    three origins that serve the page; a page on any other origin gets HTTP 403 on the socket.
 Render free behaviour and measured numbers: `ARENA-SERVER-CONTRACT.md` 6.10-6.11. In short: it sleeps 15 min after the
-last viewer message (hidden tabs send `watch:false` and no `ping`, so they let it sleep), takes about 1 min to wake on the next connection, resumes the saved brains in about 2 s, keeps the live match at 10 Hz on
-0.1 CPU while practice training slows about 10x, and uses about 1.2 KB/s per viewer.
+last viewer message (hidden tabs send `watch:false` and no `ping`, so they let it sleep), takes about 1 min to wake on the next connection, resumes the saved brains in about 2 s, keeps the live match (simulated at 10 Hz, sent at `FRAME_HZ` 5 on Render) on
+0.1 CPU while practice training slows about 10x. Render does **not** compress WebSockets: a watching viewer costs
+4.3 KB/s at FRAME_HZ 10 (about 2.5 KB/s at 5, the `render.yaml` setting, and 2.2 KB/s at 4, strike frames included) with
+`WIRE=page`, against 11.8 KB/s before, plus at most about 7.8 KB per (re)connect (29 KB before the Elo history sent to
+viewers was thinned; contract 6.10).
 
 ### Container (any Docker host)
 `docker build -t tkd-arena-server . && docker run -p 8080:8080 --env-file arena.env tkd-arena-server`
@@ -71,15 +75,18 @@ Not built here (no Docker on the box). Render uses the native Node runtime from 
 | `POOL_SAVE_EVERY_S` | 600 | minimum interval between pool uploads (also uploaded on shutdown) |
 | `MAX_VIEWERS` | 100 | further viewers get `error{code:'full'}` and fall back |
 | `FRAME_HZ` | 15 | max frames/s per viewer (the match produces 10) |
-| `WS_DEFLATE` | 1 | permessage-deflate (~7x less bandwidth); 0 = off |
+| `WIRE` | page | `page` = send only the fields the page reads (contract 6.4); `full` = pre-F1 payloads and rates |
+| `STATS_MS` | 5000 (`full`: 0) | min interval between `stats` broadcasts |
+| `PRACTICE_ROUND_MS` | 2000 (`full`: 0) | min interval between practice-round `round` messages (live rounds always sent) |
+| `WS_DEFLATE` | 1 | offer permessage-deflate (~7x less bandwidth where the proxy negotiates it; **Render does not**); 0 = off |
 | `VIZ_MS` | 1000 | viz push period (Render: 5000) |
-| `LEARN_HZ` | 1 | max `learn` messages/s per fighter |
+| `LEARN_HZ` | 0.2 (`full`: 1) | max `learn` messages/s per fighter |
 | `ROUND_MSGS` | all | `live` = forward only live-round `round` messages |
 | `ARENA_SEED` | 1 | base seed of the coach (practice RNG is re-seeded every boot, like a page open) |
 | `SERVER_NAME` | hostname / `RENDER_SERVICE_NAME` / `FLY_APP_NAME` | shown as `server.host` |
 | `WORKER_HEAP_MB` | 512 | V8 heap cap of the trainer thread |
 | `SHUTDOWN_TIMEOUT_S` | 20 | hard exit if the shutdown save hangs |
-| `HEARTBEAT_S`, `MEM_LOG_S`, `WATCHDOG_S`, `HISTORY_ROUNDS`, `HISTORY_ELO`, `QUIET` | 20, 1000, 60, 30, 100, 120, 0 | tuning |
+| `HEARTBEAT_S`, `MEM_LOG_S`, `WATCHDOG_S`, `HISTORY_ROUNDS`, `HISTORY_ELO`, `QUIET` | 20, 60, 30, 100, 120, 0 | tuning |
 
 ## Persistence setup (Supabase; done by Moneyman from a 1:1, after Waffle's review)
 1. SQL editor -> run `supabase_arena_server.sql` (idempotent, one transaction, uses the built-in `pg_catalog.sha256()`,

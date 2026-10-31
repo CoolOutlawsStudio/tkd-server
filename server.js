@@ -9,6 +9,7 @@ const http = require('http'), os = require('os'), path = require('path'), fs = r
 const { Worker } = require('worker_threads');
 const { WebSocketServer } = require('ws');
 const { createPersistence } = require('./lib/persistence');
+const W = require('./lib/wire');
 
 const SERVER_VERSION = '1.0.0', PROTOCOL = 1;
 const VENDOR = path.join(__dirname, 'vendor');
@@ -27,7 +28,12 @@ function config(env) {
     workerHeapMb: num(env.WORKER_HEAP_MB, 512), memLogMs: num(env.MEM_LOG_S, 60) * 1000,
     hostName: env.SERVER_NAME || env.RENDER_SERVICE_NAME || env.FLY_APP_NAME || os.hostname(),
     shutdownMs: num(env.SHUTDOWN_TIMEOUT_S, 20) * 1000, watchdogMs: num(env.WATCHDOG_S, 30) * 1000,
-    deflate: env.WS_DEFLATE !== '0', learnMs: 1000 / Math.max(0.01, num(env.LEARN_HZ, 1)), roundMsgs: env.ROUND_MSGS === 'live' ? 'live' : 'all',
+    deflate: env.WS_DEFLATE !== '0', roundMsgs: env.ROUND_MSGS === 'live' ? 'live' : 'all',
+    // F1 (Render does not compress): WIRE=page (default) slims frame/viz/learn/round/stats to the fields the page reads
+    // and throttles the slow panels; WIRE=full = pre-F1 payloads and rates. Each throttle can be set on its own.
+    wire: env.WIRE === 'full' ? 'full' : 'page',
+    learnMs: 1000 / Math.max(0.01, num(env.LEARN_HZ, env.WIRE === 'full' ? 1 : 0.2)),
+    statsMs: num(env.STATS_MS, env.WIRE === 'full' ? 0 : 5000), practiceRoundMs: num(env.PRACTICE_ROUND_MS, env.WIRE === 'full' ? 0 : 2000),
     frameBufferLimit: 64 * 1024, hardBufferLimit: 2 * 1024 * 1024, quiet: env.QUIET === '1'
   };
 }
@@ -108,7 +114,8 @@ function start(env, opts) {
     if (t - S.frameSentAt < gap) { S.frameTimer = setTimeout(pumpFrame, gap - (t - S.frameSentAt)); return; }
     S.frameSentAt = t; S.lastFrame._sent = true;
     const f = S.lastFrame;
-    broadcast({ type: 'frame', round: f.round, t: f.t, state: f.state, seq: ++S.frameSeq }, true);
+    broadcast({ type: 'frame', round: f.round, t: f.t, state: wireState(f), seq: ++S.frameSeq }, true);
+    f._carry = null; // events of skipped frames are delivered once, with the next frame that is sent
   }
 
   function historyMsg() {
@@ -117,7 +124,9 @@ function start(env, opts) {
     const lastR = rs.length ? rs[rs.length - 1].round : -1, lastE = es.length ? es[es.length - 1].rounds : -1;
     S.recentRounds.forEach((r) => { if (r.round > lastR) rs.push(r); });
     S.recentElo.forEach((e) => { if (e.rounds > lastE) es.push(e); });
-    return { type: 'history', replay: true, rounds: rs.slice(-C.historyRounds), elo: es.slice(-C.historyElo) };
+    // WIRE=page: the page reads history.elo only (arena-view.js history()); the 100 recent rounds were ~8 KB of every connect,
+    // and the full Elo entries ~22 KB: slimEloHistory sends <= 60 thinned {rounds, a, b} points over the same span (lib/wire.js)
+    return C.wire === 'full' ? { type: 'history', replay: true, rounds: rs.slice(-C.historyRounds), elo: es.slice(-C.historyElo) } : { type: 'history', replay: true, elo: W.slimEloHistory(es.slice(-C.historyElo)) };
   }
   function welcome(ws) {
     ws._tkd.welcomed = true;
@@ -130,7 +139,13 @@ function start(env, opts) {
     if (S.lastSavedRemote) sendTo(ws, Object.assign({}, S.lastSavedRemote, { replay: true }));
     if (S.lastFrame && ws._tkd.watch) sendTo(ws, replayFrame());
   }
-  function replayFrame() { return { type: 'frame', round: S.lastFrame.round, t: S.lastFrame.t, state: S.lastFrame.state, seq: S.frameSeq, replay: true }; }
+  function replayFrame() { const f = S.lastFrame; return { type: 'frame', round: f.round, t: f.t, state: C.wire === 'full' ? f.state : W.slimState(f.state), seq: S.frameSeq, replay: true }; }
+  // WIRE=page: frame.state slimmed (lib/wire.js) with the events of frames skipped by the FRAME_HZ limit merged in
+  function wireState(f) {
+    if (C.wire === 'full') return f.state;
+    const ev = f._carry && f._carry.length ? f._carry.concat(f.state.events || []) : f.state.events;
+    return W.slimState(f.state, ev);
+  }
   function setWatch(ws, on) {
     const k = ws._tkd, was = k.watch;
     k.watch = on;
@@ -203,20 +218,40 @@ function start(env, opts) {
         if (m.state === 'running') { setState('training', P.mode === 'memory' ? 'training (memory only: nothing survives a restart)' : null); S.backoffMs = 5000; }
         broadcast(Object.assign({}, m));
         return;
-      case 'frame':
-        delete m.epoch; S.lastFrame = m;
+      case 'frame': {
+        delete m.epoch; const prev = S.lastFrame;
+        if (prev && !prev._sent && prev.state && prev.round === m.round && watchingCount()) { // skipped by the rate limit: keep its hits for the sparks
+          const ev = (prev._carry || []).concat(prev.state.events || []);
+          if (ev.length) m._carry = ev.slice(-16);
+        }
+        S.lastFrame = m;
+        // P6 (optional, Waffle wire-qa): a fighter entering the 'active' phase (the strike itself) is never skipped either.
+        // At FRAME_HZ 5, 40% of techniques otherwise never show their active frame (a 10 Hz frame or less).
+        const actNow = m.state && m.state.fighters ? m.state.fighters.map((g) => !!g && g.phase === 'active') : [];
+        const actNew = C.wire === 'page' && actNow.some((on, i) => on && !(S.lastActive && S.lastActive[i]));
+        S.lastActive = actNow;
+        if (actNew) { if (S.frameTimer) { clearTimeout(S.frameTimer); S.frameTimer = null; } S.frameSentAt = 0; }
+        if (m.state && m.state.done && C.wire === 'page') { if (S.frameTimer) { clearTimeout(S.frameTimer); S.frameTimer = null; } S.frameSentAt = 0; } // the end-of-round frame (endReason) is never skipped
         if (!S.frameTimer && watchingCount()) pumpFrame();
         return;
+      }
       case 'round': {
         delete m.epoch;
         S.recentRounds.push({ round: m.round, winner: m.winner, hitsA: m.hits[0], hitsB: m.hits[1], live: m.live, kind: m.kind });
         if (S.recentRounds.length > 500) S.recentRounds.splice(0, S.recentRounds.length - 500);
-        if (C.roundMsgs === 'all' || m.live) broadcast(m, false, true);
+        if (!(C.roundMsgs === 'all' || m.live)) return;
+        if (C.wire === 'full') { broadcast(m, false, true); return; }
+        // practice rounds (about 5/s) only move the page's round counter, which takes max(counter + 1, round): one every
+        // PRACTICE_ROUND_MS is enough. Live rounds (the banner) are always sent.
+        const now = Date.now();
+        if (!m.live && now - (S.lastPracticeRoundSent || 0) < C.practiceRoundMs) return;
+        if (!m.live) S.lastPracticeRoundSent = now;
+        broadcast(W.slimRound(m), false, true);
         return;
       }
       case 'learn': {
         delete m.epoch; const f = m.fighter | 0, t = Date.now();
-        if (t - S.lastLearnSent[f] >= C.learnMs) { S.lastLearnSent[f] = t; broadcast(m, false, true); }
+        if (t - S.lastLearnSent[f] >= C.learnMs) { S.lastLearnSent[f] = t; broadcast(C.wire === 'full' ? m : W.slimLearn(m), false, true); }
         return;
       }
       case 'elo':
@@ -226,12 +261,15 @@ function start(env, opts) {
         broadcast(m); return;
       case 'stats':
         delete m.epoch; S.stats = m;
-        broadcast(Object.assign({}, m, { server: serverInfo() }), false, true); return;
+        if (C.wire === 'full') { broadcast(Object.assign({}, m, { server: serverInfo() }), false, true); return; }
+        if (Date.now() - (S.lastStatsSent || 0) < C.statsMs) return; // newest is kept in S.stats for replays and /state
+        S.lastStatsSent = Date.now();
+        broadcast(Object.assign(W.slimStats(m), { server: W.slimServer(serverInfo()) }), false, true); return;
       case 'saved': { // the worker's local save into mem-idb (every ~5 s); remote uploads post their own 'saved'
         const ws = S.localSaveWaiters; S.localSaveWaiters = []; ws.forEach((fn) => fn(m)); return;
       }
       case 'viz':
-        delete m.epoch; if (watchingCount()) broadcast(plain(m, 0), false, true); return;
+        delete m.epoch; if (watchingCount()) broadcast(C.wire === 'full' ? plain(m, 0) : W.slimViz(m), false, true); return;
       case 'error':
         delete m.epoch; broadcast(m); return;
       default:
@@ -302,7 +340,7 @@ function start(env, opts) {
       json(res, 200, { server: serverInfo(), elo: e ? { rounds: e.rounds, a: e.a, b: e.b, se: e.se, anchors: e.anchors, at: e.at } : null,
         stats: S.stats ? { roundsPerSec: S.stats.roundsPerSec, stepsPerSec: S.stats.stepsPerSec, liveRounds: S.stats.liveRounds, practiceRounds: S.stats.practiceRounds, wins: S.stats.wins, updates: S.stats.updates, droppedTrajectories: S.stats.droppedTrajectories } : null,
         live: S.lastFrame ? { round: S.lastFrame.round, t: S.lastFrame.t } : null, framesSent: S.framesSent, framesDropped: S.framesDropped, restored: S.restoredInfo,
-        net: { wsBytesOut: wsBytesOut(), deflate: C.deflate, frameHz: C.frameHz, vizMs: C.vizMs, learnHz: Math.round(1000 / C.learnMs * 100) / 100, roundMsgs: C.roundMsgs } });
+        net: { wsBytesOut: wsBytesOut(), deflate: C.deflate, wire: C.wire, statsMs: C.statsMs, practiceRoundMs: C.practiceRoundMs, frameHz: C.frameHz, vizMs: C.vizMs, learnHz: Math.round(1000 / C.learnMs * 100) / 100, roundMsgs: C.roundMsgs } });
       return;
     }
     if (p === '/') { json(res, 200, { name: 'tkd-arena-server', ws: '/arena', health: '/health', state: '/state', protocol: PROTOCOL }); return; }
@@ -365,7 +403,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDe
   const timers = [];
   timers.push(setInterval(() => { // heartbeat
     for (const ws of S.clients) { if (!ws._tkd.alive) { ws.terminate(); S.clients.delete(ws); continue; } ws._tkd.alive = false; try { ws.ping(); } catch (e) { /* ignore */ } }
-    broadcast(helloMsg({ heartbeat: true }));
+    broadcast(C.wire === 'full' ? helloMsg({ heartbeat: true }) : Object.assign(helloMsg({ heartbeat: true }), { server: W.slimServer(serverInfo()), version: undefined })); // the full server info is in the first hello and /state
   }, C.heartbeatMs));
   timers.push(setInterval(() => { // viz for watching viewers (1/s)
     if (S.worker && S.state === 'training' && watchingCount()) S.worker.postMessage({ type: 'viz', id: 'server-' + (++S.vizSeq) });
