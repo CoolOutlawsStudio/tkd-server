@@ -1,0 +1,5 @@
+# phase 1: 150 s unlimited, stored: pool gen 1 1328028 B, state gen 2 138136 B, state gen 3 138848 B, pool gen 2 1460140 B | rounds 702
+# phase 2 cold start at 0.1 CPU (ms since process spawn): {"listen":202,"hello:waking":306,"hello:resuming":1505,"ready":2107,"restored":true,"rounds":702,"hello:training":2108,"frame":2307}
+  PASS resumed from Supabase and streaming in < 15 s (2307 ms)
+  PASS SIGTERM save at 0.1 CPU finishes inside Render's 30 s window (1530 ms, last uploads 139277 B + 1460576 B)
+coldstart: 2 passed, 0 failed

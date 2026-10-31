@@ -1,0 +1,12 @@
+# boot -> training: 149 ms, cpu unlimited, env {"WS_DEFLATE":"0"}
+# ON THE WIRE (WebSocket bytes written, deflate false): 15.00 KB/s = 55.3 MB/hour = 39.81 GB/month per viewer connected 24/7; 5 GB/month = 90 viewer-hours
+type | msgs/s | bytes/s | avg bytes
+frame | 10.00 | 9342 | 934
+viz | 1.00 | 3959 | 3959
+round | 4.95 | 745 | 150
+stats | 0.48 | 657 | 1360
+learn | 1.68 | 443 | 263
+hello | 0.05 | 86 | 1712
+elo | 0.20 | 54 | 271
+# JSON payload (before deflate) 14.9 KB/s payload per viewer = 55.0 MB/hour = 39.6 GB/month if connected 24/7; 5 GB/month = 91 viewer-hours
+# frames 10.00/s, gap p50 99 p95 107 p99 109 max 111 ms | trainer: rounds/s 5.97, steps/s 3195, updates 224,225, live round 2 t 2 | rss 141.7 MB

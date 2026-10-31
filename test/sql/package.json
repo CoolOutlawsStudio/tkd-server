@@ -1,0 +1,1 @@
+{ "private": true, "description": "SQL test for ../../supabase_arena_server.sql on PGlite (WASM Postgres 17 + pgcrypto). cd test/sql && npm i && node sqltest.mjs", "type": "module", "devDependencies": { "@electric-sql/pglite": "^0.5.13" } }
