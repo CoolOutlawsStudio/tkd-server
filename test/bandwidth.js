@@ -5,7 +5,7 @@ const U = require('./util');
 const SECS = Number(process.argv[2] || 120), LIMIT = Number(process.env.CPU_LIMIT || 0);
 (async () => {
   const port = 23000 + Math.floor(Math.random() * 900);
-  const pass = {}; for (const k of ['FRAME_HZ', 'VIZ_MS', 'TRAIN_DUTY', 'LEARN_HZ', 'ROUND_MSGS', 'WS_DEFLATE']) if (process.env[k]) pass[k] = process.env[k];
+  const pass = {}; for (const k of ['FRAME_HZ', 'VIZ_MS', 'TRAIN_DUTY', 'LEARN_HZ', 'ROUND_MSGS', 'WS_DEFLATE', 'WIRE', 'STATS_MS', 'PRACTICE_ROUND_MS']) if (process.env[k]) pass[k] = process.env[k];
   const t0 = Date.now();
   const srv = U.spawnServer(Object.assign({ PORT: String(port), QUIET: '1' }, pass), LIMIT ? { prefix: ['taskset', '-c', process.env.CPU || '3'] } : {});
   let duty = null;

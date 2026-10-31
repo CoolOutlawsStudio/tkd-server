@@ -14,7 +14,7 @@ const U = require('./util');
     U.check(first.type === 'hello', 'first message is hello', first.type + ' state=' + first.state);
     U.check(['waking', 'resuming', 'training', 'paused'].indexOf(first.state) >= 0 && first.since && first.version && first.persistence && typeof first.viewers === 'number' && typeof first.rounds === 'number', 'hello has state/since/rounds/viewers/persistence/version');
     U.check(ws.msgs.some((m) => m.type === 'ready' && m.mode === 'server' && m.sim === 'arena-sim.js' && m.stub === false && m.obsDim > 0), 'ready (real sim, mode server)');
-    U.check(ws.msgs.some((m) => m.type === 'history' && Array.isArray(m.elo) && Array.isArray(m.rounds)), 'history snapshot');
+    U.check(ws.msgs.some((m) => m.type === 'history' && Array.isArray(m.elo) && m.rounds === undefined), 'history snapshot (WIRE=page: elo only, P1)');
     U.check(ws.msgs.every((m) => typeof m.epoch === 'number'), 'every message carries epoch');
     // frame rate over 10 s
     const f0 = ws.counts.frame, t0 = Date.now(); await U.sleep(10000);
@@ -29,7 +29,7 @@ const U = require('./util');
     U.check(st.server && st.server.host && st.server.uptime >= 0 && st.server.viewers === 1 && st.server.persistence.mode === 'memory', 'stats.server field', 'viewers ' + st.server.viewers);
     U.check(ws.counts.viz > 0, 'viz broadcast ~1/s', ws.counts.viz);
     const vz = ws.msgs.filter((m) => m.type === 'viz').pop();
-    U.check(vz.fighters.length === 2 && Array.isArray(vz.fighters[0].layers[0].activations), 'viz activations are JSON arrays');
+    U.check(vz.fighters.length === 2 && Array.isArray(vz.fighters[0].probs) && vz.fighters[0].probs.length > 0, 'viz probs are JSON arrays (WIRE=page: probs only)');
     // ping / not-accepted / reset guard
     ws.send(JSON.stringify({ type: 'ping', t: 123 }));
     ws.send(JSON.stringify({ type: 'pause' }));

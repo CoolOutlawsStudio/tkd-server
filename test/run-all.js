@@ -4,7 +4,7 @@
 'use strict';
 const { spawnSync } = require('child_process'), path = require('path');
 let failed = 0;
-for (const t of ['test-stream.js', 'test-watch.js', 'test-persist.js', 'test-file-and-limits.js']) {
+for (const t of ['test-stream.js', 'test-watch.js', 'test-persist.js', 'test-file-and-limits.js', 'test-wire.js']) {
   console.log('=== ' + t);
   const r = spawnSync(process.execPath, [path.join(__dirname, t)], { stdio: 'inherit' });
   if (r.status !== 0) failed++;
