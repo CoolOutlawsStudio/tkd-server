@@ -1,0 +1,46 @@
+# Render Blueprint for CoolOutlawsStudio/tkd-server (free plan). Nothing here is secret: the three secrets are
+# `sync: false` and are typed into the Render dashboard when the service is created.
+# Free plan facts this config is tuned for (render.com/docs/free, checked Oct 30, 2026): 0.1 CPU / 512 MB, spins down
+# after 15 min without an inbound HTTP request or inbound WebSocket MESSAGE, ~1 min to spin up on the next request or
+# new WebSocket connection, ephemeral disk, SIGTERM + 30 s on every stop/deploy, outbound bandwidth counted
+# (WebSocket output AND the Supabase uploads). No keep-alive pinger is configured (Toml's call).
+services:
+  - type: web
+    name: tkd-arena-server
+    runtime: node
+    plan: free
+    region: oregon                   # pick the region closest to the Supabase project before creating the service
+    branch: main
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: ALLOWED_ORIGINS
+        value: https://cooloutlawsstudio.github.io,https://tkd-net.netlify.app
+      - key: SUPABASE_URL
+        value: https://oxwapwhazogjgjdtyvsx.supabase.co
+      - key: SUPABASE_ANON_KEY       # the PUBLIC anon key (a service_role key is refused by the server)
+        sync: false
+      - key: SERVER_SECRET           # >= 32 random chars; only its sha256 goes into Supabase (README)
+        sync: false
+      - key: ADMIN_TOKEN             # >= 16 chars; enables the admin reset message
+        sync: false
+      - key: SAVE_EVERY_S            # brains+history checkpoint (~136 KB each)
+        value: "60"
+      - key: POOL_SAVE_EVERY_S       # opponent pool (~1.3-1.5 MB): hourly + on SIGTERM, to spare bandwidth
+        value: "3600"
+      - key: VIZ_MS                  # network-panel push every 5 s (1 s costs ~3x the bandwidth)
+        value: "5000"
+      - key: FRAME_HZ                # live match is 10 Hz; never send more
+        value: "10"
+      - key: MAX_VIEWERS
+        value: "50"
+      - key: WORKER_HEAP_MB
+        value: "256"
+      - key: MALLOC_ARENA_MAX        # fewer glibc arenas for the 2 threads (small effect: full-speed RSS still reached ~270 MB at 12 min)
+        value: "2"
+      - key: SHUTDOWN_TIMEOUT_S      # inside Render's 30 s SIGTERM window
+        value: "25"

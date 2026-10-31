@@ -1,0 +1,5 @@
+node_modules/
+test/sql/node_modules/
+*.env
+.env*
+arena.env

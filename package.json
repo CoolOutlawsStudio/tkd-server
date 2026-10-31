@@ -1,0 +1,15 @@
+{
+  "name": "tkd-arena-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TKD-Net Arena server: runs the browser arena worker (arena-sim.js + arena-rl.js) headless, forever, and streams the live match to every page over WebSocket.",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "sync": "node scripts/sync-vendor.js",
+    "check-vendor": "node scripts/sync-vendor.js --check",
+    "test": "node test/run-all.js"
+  },
+  "dependencies": { "ws": "^8.18.0" }
+}
