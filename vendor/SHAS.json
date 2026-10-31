@@ -1,0 +1,30 @@
+{
+  "source": "/workspace/tkd-net",
+  "syncedAt": "2026-10-31T02:20:37.856Z",
+  "files": {
+    "arena-sim.js": {
+      "sha256": "6952e8444262425e5c9f6bf1dc6e74f1f0d2794ae06b7471388d49634b29ff24",
+      "sha8": "6952e844",
+      "bytes": 27789,
+      "from": "arena-sim.js"
+    },
+    "arena-rl.js": {
+      "sha256": "e6bb0ad71c0ccb2722cf1868ce1d24bf66005898991d157ac478786544c9670c",
+      "sha8": "e6bb0ad7",
+      "bytes": 49152,
+      "from": "arena/arena-rl.js"
+    },
+    "arena-worker.js": {
+      "sha256": "4fd78ad4a774e833b9b0cf4f2417491d0fa10bcb6064a27a7ef3f2954fbb391b",
+      "sha8": "4fd78ad4",
+      "bytes": 17343,
+      "from": "arena/arena-worker.js"
+    },
+    "arena-store.js": {
+      "sha256": "1f7cdea6c726d299d423b753feae01e4e18213c780ccd27385299881ef84c1c5",
+      "sha8": "1f7cdea6",
+      "bytes": 7644,
+      "from": "arena/arena-store.js"
+    }
+  }
+}
